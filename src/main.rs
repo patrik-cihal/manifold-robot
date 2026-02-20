@@ -27,7 +27,11 @@ enum ConnectionStatus {
 
 fn main() {
     dotenvy::dotenv().ok();
-    dioxus::launch(App);
+    dioxus::LaunchBuilder::new()
+        .with_cfg(desktop! {
+            dioxus::desktop::Config::new().with_menu(None)
+        })
+        .launch(App);
 }
 
 #[component]
@@ -313,6 +317,46 @@ fn EventFeed() -> Element {
     }
 }
 
+/// Split log text into segments, rendering URLs as clickable links.
+fn render_log_text(text: &str) -> Element {
+    let mut segments: Vec<Element> = Vec::new();
+    let mut rest = text;
+
+    while let Some(start) = rest.find("https://") .or_else(|| rest.find("http://")) {
+        if start > 0 {
+            let before = &rest[..start];
+            segments.push(rsx! { "{before}" });
+        }
+        let url_rest = &rest[start..];
+        let end = url_rest
+            .find(|c: char| c.is_whitespace() || c == ')' || c == ']' || c == '>' || c == '"')
+            .unwrap_or(url_rest.len());
+        let url = &url_rest[..end];
+        let url_owned = url.to_string();
+        segments.push(rsx! {
+            a {
+                href: "{url_owned}",
+                target: "_blank",
+                class: "underline text-blue-400 hover:text-blue-300",
+                "{url_owned}"
+            }
+        });
+        rest = &url_rest[end..];
+    }
+
+    if !rest.is_empty() {
+        segments.push(rsx! { "{rest}" });
+    }
+
+    rsx! {
+        span {
+            for seg in segments {
+                {seg}
+            }
+        }
+    }
+}
+
 #[component]
 fn TradeLog() -> Element {
     let log_entries = use_context::<Signal<Vec<BotLogEntry>>>();
@@ -333,11 +377,11 @@ fn TradeLog() -> Element {
                             BotLogEntry::Trade(_) => "text-green-400 py-0.5 border-b border-gray-700",
                             BotLogEntry::Error(_) => "text-red-400 py-0.5 border-b border-gray-700",
                         },
-                        {match entry {
+                        {render_log_text(match entry {
                             BotLogEntry::Info(s) => s.as_str(),
                             BotLogEntry::Trade(s) => s.as_str(),
                             BotLogEntry::Error(s) => s.as_str(),
-                        }}
+                        })}
                     }
                 }
             }

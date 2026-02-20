@@ -53,6 +53,7 @@ pub struct ContractData {
     pub probability: Option<f64>,
     pub p: Option<f64>,
     pub total_liquidity: Option<f64>,
+    pub text_description: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

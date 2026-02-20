@@ -2650,6 +2650,7 @@ name = "manifold-domination"
 version = "0.1.0"
 dependencies = [
  "dioxus",
+ "dirs",
  "dotenvy",
  "futures-util",
  "reqwest",

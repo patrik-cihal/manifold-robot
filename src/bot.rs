@@ -2,7 +2,8 @@ use crate::api::{BetRequest, ManifoldClient};
 use crate::ws::{BetData, NewContractBroadcast, WsEvent};
 use crate::xai::{self, XaiClient};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
@@ -34,6 +35,47 @@ impl Default for BotConfig {
     }
 }
 
+const CACHE_TTL_SECS: u64 = 24 * 60 * 60;
+
+fn cache_file_path() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("manifold-domination")
+        .join("analyzed_cache.json")
+}
+
+fn now_epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn load_cache() -> HashMap<String, u64> {
+    let path = cache_file_path();
+    let data = match std::fs::read_to_string(&path) {
+        Ok(d) => d,
+        Err(_) => return HashMap::new(),
+    };
+    let cache: HashMap<String, u64> = match serde_json::from_str(&data) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    let now = now_epoch_secs();
+    cache
+        .into_iter()
+        .filter(|(_, ts)| now.saturating_sub(*ts) < CACHE_TTL_SECS)
+        .collect()
+}
+
+fn save_cache(cache: &HashMap<String, u64>) {
+    let path = cache_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, serde_json::to_string(cache).unwrap_or_default());
+}
+
 pub async fn run_bot(
     manifold: ManifoldClient,
     xai: XaiClient,
@@ -49,9 +91,8 @@ pub async fn run_bot(
         config.min_liquidity,
     )));
 
-    // Track which markets we've already analyzed today (market_id -> when analyzed)
-    let mut analyzed_cache: HashMap<String, Instant> = HashMap::new();
-    let cache_ttl = std::time::Duration::from_secs(24 * 60 * 60);
+    // Track which markets we've already analyzed (market_id -> epoch secs), persisted to disk
+    let mut analyzed_cache = load_cache();
 
     while let Some(event) = ws_rx.recv().await {
         match event {
@@ -82,7 +123,8 @@ pub async fn run_bot(
                         liquidity, contract.question, creator.username
                     )));
                     // Mark as analyzed so bet events don't re-trigger
-                    analyzed_cache.insert(contract.id.clone(), Instant::now());
+                    analyzed_cache.insert(contract.id.clone(), now_epoch_secs());
+                    save_cache(&analyzed_cache);
                     let manifold = manifold.clone();
                     let xai = xai.clone();
                     let log_tx = log_tx.clone();
@@ -100,12 +142,14 @@ pub async fn run_bot(
             }
             WsEvent::NewBet(bet) => {
                 // Evict stale cache entries periodically
-                analyzed_cache.retain(|_, ts| ts.elapsed() < cache_ttl);
+                let now = now_epoch_secs();
+                analyzed_cache.retain(|_, ts| now.saturating_sub(*ts) < CACHE_TTL_SECS);
 
                 if analyzed_cache.contains_key(&bet.contract_id) {
                     continue;
                 }
-                analyzed_cache.insert(bet.contract_id.clone(), Instant::now());
+                analyzed_cache.insert(bet.contract_id.clone(), now);
+                save_cache(&analyzed_cache);
 
                 let manifold = manifold.clone();
                 let xai = xai.clone();
@@ -137,7 +181,8 @@ async fn handle_new_market(
         "Researching \"{question}\"...",
     )));
 
-    let result = match xai.research_market(question).await {
+    let description = broadcast.contract.text_description.as_deref();
+    let result = match xai.research_market(question, description).await {
         Ok(r) => r,
         Err(e) => {
             let _ = log_tx.send(BotLogEntry::Error(format!(
@@ -148,7 +193,13 @@ async fn handle_new_market(
     };
 
     let prediction = match xai::parse_prediction(&result.text) {
-        Some(p) => p,
+        Some(xai::PredictionResult::Predict(p)) => p,
+        Some(xai::PredictionResult::Skip(reason)) => {
+            let _ = log_tx.send(BotLogEntry::Info(format!(
+                "Skipping unevaluable market: \"{question}\" | {reason}",
+            )));
+            return;
+        }
         None => {
             let _ = log_tx.send(BotLogEntry::Error(format!(
                 "Could not parse prediction for \"{question}\"",
@@ -252,7 +303,8 @@ async fn handle_bet_triggered(
         "Analyzing market (bet-triggered, M${liquidity:.0} liq): \"{question}\""
     )));
 
-    let result = match xai.research_market(question).await {
+    let description = market.text_description.as_deref();
+    let result = match xai.research_market(question, description).await {
         Ok(r) => r,
         Err(e) => {
             let _ = log_tx.send(BotLogEntry::Error(format!(
@@ -263,7 +315,13 @@ async fn handle_bet_triggered(
     };
 
     let prediction = match xai::parse_prediction(&result.text) {
-        Some(p) => p,
+        Some(xai::PredictionResult::Predict(p)) => p,
+        Some(xai::PredictionResult::Skip(reason)) => {
+            let _ = log_tx.send(BotLogEntry::Info(format!(
+                "Skipping unevaluable market: \"{question}\" | {reason}",
+            )));
+            return;
+        }
         None => {
             let _ = log_tx.send(BotLogEntry::Error(format!(
                 "Could not parse prediction for \"{question}\""

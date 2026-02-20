@@ -30,6 +30,7 @@ pub struct Market {
     pub close_time: Option<u64>,
     pub creator_username: String,
     pub total_liquidity: Option<f64>,
+    pub text_description: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
