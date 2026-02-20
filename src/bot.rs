@@ -146,6 +146,12 @@ pub async fn run_bot(
                 analyzed_cache.retain(|_, ts| now.saturating_sub(*ts) < CACHE_TTL_SECS);
 
                 if analyzed_cache.contains_key(&bet.contract_id) {
+                    let _ = log_tx.send(BotLogEntry::Info(format!(
+                        "Already analyzed market {} — skipping (prob {:.0}% → {:.0}%)",
+                        bet.contract_id,
+                        bet.prob_before * 100.0,
+                        bet.prob_after * 100.0,
+                    )));
                     continue;
                 }
                 analyzed_cache.insert(bet.contract_id.clone(), now);
@@ -289,12 +295,28 @@ async fn handle_bet_triggered(
         }
     };
 
-    if market.is_resolved || market.outcome_type != "BINARY" {
+    if market.is_resolved {
+        let _ = log_tx.send(BotLogEntry::Info(format!(
+            "Skipping resolved market (bet-triggered): \"{}\"",
+            market.question
+        )));
+        return;
+    }
+
+    if market.outcome_type != "BINARY" {
+        let _ = log_tx.send(BotLogEntry::Info(format!(
+            "Skipping non-binary market (bet-triggered): \"{}\" [{}]",
+            market.question, market.outcome_type
+        )));
         return;
     }
 
     let liquidity = market.total_liquidity.unwrap_or(0.0);
     if liquidity < config.min_liquidity {
+        let _ = log_tx.send(BotLogEntry::Info(format!(
+            "Skipping low-liquidity market (bet-triggered, M${liquidity:.0}): \"{}\"",
+            market.question
+        )));
         return;
     }
 

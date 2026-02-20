@@ -5,6 +5,20 @@ struct XaiRequest {
     model: String,
     input: Vec<InputMessage>,
     tools: Vec<Tool>,
+    text: TextFormat,
+}
+
+#[derive(Serialize)]
+struct TextFormat {
+    format: FormatSpec,
+}
+
+#[derive(Serialize)]
+struct FormatSpec {
+    #[serde(rename = "type")]
+    format_type: String,
+    name: String,
+    schema: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -100,21 +114,35 @@ impl XaiClient {
             "Search X (Twitter) for recent posts, news, and discussion about the following \
              prediction market question. Focus on finding concrete evidence: official announcements, \
              credible reporting, expert opinions, and sentiment from informed accounts.\n\n\
-             Based ONLY on what you find on X, estimate the probability (0-100%) that this \
+             Based ONLY on what you find on X, estimate the probability (0-100) that this \
              resolves YES. If you find little or no relevant information on X, say so and \
-             give a low-confidence estimate near 50%.\n\n\
-             IMPORTANT: If this market is subjective, personal, not objectively resolvable, \
+             give a low-confidence estimate near 50.\n\n\
+             If this market is subjective, personal, not objectively resolvable, \
              or depends on information you cannot access (e.g. private metrics, personal decisions, \
-             inside knowledge), respond with SKIP instead of a probability.\n\n\
-             You MUST end your response with exactly one of these formats:\n\n\
-             Option A — you can evaluate the market:\n\
-             REASONING: <one sentence summary of the key evidence found>\n\
-             PROBABILITY: XX%\n\n\
-             Option B — you cannot reliably evaluate the market:\n\
-             REASONING: <why this market cannot be evaluated>\n\
-             SKIP\n\n\
+             inside knowledge), set action to \"skip\".\n\n\
              Question: \"{question}\"{description_section}"
         );
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["predict", "skip"],
+                    "description": "Whether to predict or skip this market"
+                },
+                "probability": {
+                    "type": "number",
+                    "description": "Predicted probability 0-100 that the market resolves YES. Required when action is predict."
+                },
+                "reasoning": {
+                    "type": "string",
+                    "description": "One sentence summary of key evidence or why the market was skipped"
+                }
+            },
+            "required": ["action", "reasoning"],
+            "additionalProperties": false
+        });
 
         let request = XaiRequest {
             model: "grok-4-1-fast".to_string(),
@@ -125,6 +153,13 @@ impl XaiClient {
             tools: vec![Tool {
                 tool_type: "x_search".to_string(),
             }],
+            text: TextFormat {
+                format: FormatSpec {
+                    format_type: "json_schema".to_string(),
+                    name: "market_prediction".to_string(),
+                    schema,
+                },
+            },
         };
 
         let resp = self
@@ -163,36 +198,31 @@ pub enum PredictionResult {
     Skip(String),
 }
 
-/// Parse "REASONING: ..." and "PROBABILITY: XX%" or "SKIP" from the response text.
+#[derive(Deserialize)]
+struct JsonPrediction {
+    action: String,
+    probability: Option<f64>,
+    reasoning: String,
+}
+
+/// Parse structured JSON prediction from the response text.
 pub fn parse_prediction(text: &str) -> Option<PredictionResult> {
-    let mut probability = None;
-    let mut reasoning = String::new();
-    let mut skip = false;
+    let parsed: JsonPrediction = serde_json::from_str(text).ok()?;
 
-    for line in text.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("PROBABILITY:") {
-            let rest = rest.trim().trim_end_matches('%').trim();
-            if let Ok(pct) = rest.parse::<f64>() {
-                if (0.0..=100.0).contains(&pct) {
-                    probability = Some(pct / 100.0);
-                }
+    match parsed.action.as_str() {
+        "skip" => Some(PredictionResult::Skip(parsed.reasoning)),
+        "predict" => {
+            let pct = parsed.probability?;
+            if !(0.0..=100.0).contains(&pct) {
+                return None;
             }
-        } else if let Some(rest) = line.strip_prefix("REASONING:") {
-            reasoning = rest.trim().to_string();
-        } else if line == "SKIP" {
-            skip = true;
+            Some(PredictionResult::Predict(Prediction {
+                probability: pct / 100.0,
+                reasoning: parsed.reasoning,
+            }))
         }
+        _ => None,
     }
-
-    if skip {
-        return Some(PredictionResult::Skip(reasoning));
-    }
-
-    probability.map(|p| PredictionResult::Predict(Prediction {
-        probability: p,
-        reasoning,
-    }))
 }
 
 #[cfg(test)]
@@ -201,7 +231,10 @@ mod tests {
 
     #[test]
     fn test_parse_prediction() {
-        let r = parse_prediction("blah\nREASONING: Strong evidence\nPROBABILITY: 65%").unwrap();
+        let r = parse_prediction(
+            r#"{"action":"predict","probability":65,"reasoning":"Strong evidence"}"#,
+        )
+        .unwrap();
         match r {
             PredictionResult::Predict(p) => {
                 assert_eq!(p.probability, 0.65);
@@ -210,7 +243,10 @@ mod tests {
             PredictionResult::Skip(_) => panic!("expected Predict"),
         }
 
-        let r = parse_prediction("PROBABILITY: 10%\n").unwrap();
+        let r = parse_prediction(
+            r#"{"action":"predict","probability":10,"reasoning":""}"#,
+        )
+        .unwrap();
         match r {
             PredictionResult::Predict(p) => {
                 assert_eq!(p.probability, 0.10);
@@ -219,9 +255,12 @@ mod tests {
             PredictionResult::Skip(_) => panic!("expected Predict"),
         }
 
-        assert!(parse_prediction("no probability here").is_none());
+        assert!(parse_prediction("not json at all").is_none());
 
-        let r = parse_prediction("REASONING: Subjective market\nSKIP").unwrap();
+        let r = parse_prediction(
+            r#"{"action":"skip","reasoning":"Subjective market"}"#,
+        )
+        .unwrap();
         match r {
             PredictionResult::Skip(reason) => assert_eq!(reason, "Subjective market"),
             PredictionResult::Predict(_) => panic!("expected Skip"),
