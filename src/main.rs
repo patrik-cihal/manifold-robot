@@ -224,6 +224,14 @@ fn BotDashboard() -> Element {
                                     b.contract.question, b.creator.username, b.contract.outcome_type
                                 ));
                             }
+                            ws::WsEvent::NewBet(b) => {
+                                ws_events.write().push(format!(
+                                    "New bet: market {} (prob {:.0}% → {:.0}%)",
+                                    &b.contract_id[..8.min(b.contract_id.len())],
+                                    b.prob_before * 100.0,
+                                    b.prob_after * 100.0,
+                                ));
+                            }
                             ws::WsEvent::Error(e) => {
                                 ws_events.write().push(format!("Error: {e}"));
                             }

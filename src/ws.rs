@@ -63,10 +63,24 @@ pub struct CreatorData {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BetData {
+    pub contract_id: String,
+    pub prob_before: f64,
+    pub prob_after: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct NewBetBroadcast {
+    bets: Vec<BetData>,
+}
+
 #[derive(Debug, Clone)]
 pub enum WsEvent {
     Connected,
     NewContract(Box<NewContractBroadcast>),
+    NewBet(Box<BetData>),
     Error(String),
     Disconnected,
 }
@@ -91,7 +105,10 @@ async fn connect_and_listen(
     let sub = WsClientMsg {
         msg_type: "subscribe".to_string(),
         txid: 1,
-        topics: Some(vec!["global/new-contract".to_string()]),
+        topics: Some(vec![
+            "global/new-contract".to_string(),
+            "global/new-bet".to_string(),
+        ]),
     };
     write
         .send(Message::Text(serde_json::to_string(&sub)?.into()))
@@ -165,6 +182,16 @@ fn parse_broadcast(topic: &str, data: serde_json::Value) -> WsEvent {
         "global/new-contract" => match serde_json::from_value::<NewContractBroadcast>(data) {
             Ok(broadcast) => WsEvent::NewContract(Box::new(broadcast)),
             Err(e) => WsEvent::Error(format!("Failed to parse new contract: {e}")),
+        },
+        "global/new-bet" => match serde_json::from_value::<NewBetBroadcast>(data) {
+            Ok(broadcast) => {
+                if let Some(bet) = broadcast.bets.into_iter().next() {
+                    WsEvent::NewBet(Box::new(bet))
+                } else {
+                    WsEvent::Error("Empty bets array in new-bet broadcast".to_string())
+                }
+            }
+            Err(e) => WsEvent::Error(format!("Failed to parse new bet: {e}")),
         },
         _ => WsEvent::Error(format!("Unknown topic: {topic}")),
     }

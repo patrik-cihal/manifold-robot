@@ -29,6 +29,7 @@ pub struct Market {
     pub is_resolved: bool,
     pub close_time: Option<u64>,
     pub creator_username: String,
+    pub total_liquidity: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
