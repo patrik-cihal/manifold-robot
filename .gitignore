@@ -1,0 +1,22 @@
+# Build artifacts
+/target
+/dist
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Rust backup files
+**/*.rs.bk
